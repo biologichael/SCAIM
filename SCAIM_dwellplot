@@ -1,0 +1,15 @@
+function output = SCAIM_dwellplot(dwell)
+
+X = 1;
+Y = repelem(dwell(:,1),2);
+X_1 = cumsum(dwell(:,2));
+X_1 = repelem(X_1,2);
+X_1 = vertcat(X,X_1);
+X_1(end) = [];
+
+
+plot(X_1,Y);
+ 
+ylim([-0.5 1.5])
+
+output = Y;

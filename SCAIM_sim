@@ -1,0 +1,267 @@
+function dwell = SCAIM_sim(model,parameters,constrains,microscopic_reversibility,target_dwells,nr_of_open_states)
+
+
+
+
+[Q, ~,~] = model2Q_v2(model,parameters,constrains,microscopic_reversibility,0,0.001,200000);
+
+Q_column = 1;
+
+iti = 1;
+total_dwells = 0;
+dwell = [0 0];
+open_count = 0;
+state_transition_counter = 0;
+
+while round(target_dwells/2) > open_count
+    state_transition_counter = state_transition_counter + 1;
+if Q_column <= nr_of_open_states
+    state = 1;
+    open_count = open_count + 1;
+    current_number_of_dwelltimes = open_count * 2;
+    disp('current_number_of_dwelltimes')
+    disp(current_number_of_dwelltimes)
+else 
+    state = 0;
+end
+
+dwell(iti,1) = state;
+dwell(iti,2) = -(-1/Q(Q_column,Q_column)) * log(rand);
+iti = iti + 1;
+transitions = Q(Q_column,:);
+transitions(transitions<0) = 0;
+[~,J,V] = find(transitions);
+transition_matrix = vertcat(J,V);
+r = rand;
+new_Q_column = 0;
+row = 1;
+while new_Q_column == 0
+    if r <= sum(transition_matrix(2,1:row))/sum(transition_matrix(2,:))
+        new_Q_column = transition_matrix(1,row);
+    else
+        row = row + 1;
+    end
+end
+Q_column = new_Q_column;
+end
+
+
+
+dwell( all(~dwell,2), : ) = [];
+for row = 1:size(dwell,1)-1
+    if dwell(row,1) == dwell(row+1,1)
+        dwell(row+1,2) = dwell(row,2) + dwell(row+1,2);
+        dwell(row,1) = 0;
+        dwell(row,2) = 0;
+    end
+end
+dwell( all(~dwell,2), : ) = [];
+
+state_transition_counter
+
+
+function [Q, all_parameter,corrected_initial_guess] = model2Q_v2(model,parameters,constrains,micro_rev,MR_correction,LB,UB)
+
+parameters=parameters';
+
+
+model(model==0)=9999;
+model = sort(model,2);
+model(model==9999)=0;
+
+
+nr_parameters = sum(sum(model > 0));
+all_parameter = zeros(nr_parameters,1);
+
+parameter_nr_in_model = model';
+parameter_nr_in_model(parameter_nr_in_model > 0) = 1;
+counter = 1;
+for parameter_nr = 1:(size(model,1) * size(model,2))
+    if parameter_nr_in_model(parameter_nr) == 1
+        parameter_nr_in_model(parameter_nr) = counter;
+        counter = counter + 1;
+    end
+end
+parameter_nr_in_model = parameter_nr_in_model';
+
+
+% set fixed parameters
+if constrains(1) ~= 0
+fixed = constrains(:,4:5);
+fixed(fixed == 0) = nr_parameters + 1;
+all_parameter(fixed(:,1)) = fixed(:,2);
+all_parameter = all_parameter(1:nr_parameters,1);
+end
+
+% find kinetic reversibility constrained
+% Vi starter med den state med lavest nummer, og finder den state der
+% konnektes til med lavest nummer. Så går vi til den nye og finder hvilken
+% den konnekter til som ikke er den vi kom fra osv.
+
+nr_of_mic_rev = size(micro_rev,1);
+if micro_rev(1) ~= 0
+for mic_rev_nr = 1:nr_of_mic_rev
+states_in_circle = micro_rev(mic_rev_nr,2:end);
+states_in_circle(states_in_circle==0) = [];
+connect_candidate = 0;
+past_connect = 0;
+balanced_dirrection = zeros(size(states_in_circle,2),2);
+
+for state = 1:size(states_in_circle,2)
+    if state == 1
+        current_state = min(states_in_circle);
+    end
+    
+    for connection = 1:size(states_in_circle,2)
+        
+        if state == size(states_in_circle,2)
+
+            balanced_dirrection(state,1) = parameter_nr_in_model(current_state, find(model(current_state,:) == min(states_in_circle)));
+            balanced_dirrection(state,2) = parameter_nr_in_model(min(states_in_circle), find(model(min(states_in_circle),:) == current_state));
+            
+        else
+        connect = find(model(current_state,:) == states_in_circle(connection));
+        if isempty(connect) ~= 1
+            if model(current_state,connect) > connect_candidate && model(current_state,connect) ~= past_connect
+                connect_candidate = model(current_state,connect);
+                balanced_dirrection(state,1) = parameter_nr_in_model(current_state,connect);
+                balanced_dirrection(state,2) = parameter_nr_in_model(connect_candidate, find(model(connect_candidate,:) == current_state));
+                
+            end
+        end
+        end
+    end
+
+    past_connect = current_state;
+    current_state = connect_candidate;
+    connect_candidate = 0;
+    
+end
+
+if find(balanced_dirrection == micro_rev(mic_rev_nr,1)) > size(states_in_circle,2)
+    balanced_dirrection = flip(balanced_dirrection,2);
+end
+dir_1 = balanced_dirrection(:,1);
+dir_2 = balanced_dirrection(:,2);
+% replace linket parameters by their multiplication factor
+MR_factor = 1;
+for row_con = 1:size(constrains,1)
+    if isempty(find(dir_1==constrains(row_con,2))) ~= 1 % contrain nr row_con er i MR, er den parameter der sætters efter den også?
+        if isempty(find(dir_2==constrains(row_con,1))) ~= 1
+            dir_1(dir_1 == constrains(row_con,2)) = [];
+            dir_2(dir_2 == constrains(row_con,1)) = [];
+            MR_factor = constrains(row_con,3);
+        end
+    end
+    if isempty(find(dir_2==constrains(row_con,2))) ~= 1 % contrain nr row_con er i MR, er den parameter der sætters efter den også?
+        if isempty(find(dir_1==constrains(row_con,1))) ~= 1
+            dir_2(dir_2 == constrains(row_con,2)) = [];
+            dir_1(dir_1 == constrains(row_con,1)) = [];
+            MR_factor = 1/constrains(row_con,3);
+        end
+    end
+end
+
+
+
+dir_1(dir_1 == micro_rev(mic_rev_nr,1)) = [];
+micro_revers_cell(mic_rev_nr,1) = {dir_1};
+micro_revers_cell(mic_rev_nr,2) = {dir_2};
+
+end
+end
+
+
+% De states der angives som at cykliske må hver have mindst to connections,
+% og for cyclen skal hver state 
+
+if micro_rev(1) ~= 0
+all_parameter(micro_rev(:,1)) = -1;
+end
+
+% insert remaining parameters while taking constrains into consideration
+for i = 1:nr_parameters
+    if all_parameter(i) == 0 % not fixed
+        if constrains(1) ~= 0
+        set_constrains_index = find(constrains(:,2) == i);
+        end
+        all_parameter(i) = parameters(i);
+        if constrains(1) ~= 0
+        if set_constrains_index ~= 0
+            
+        all_parameter(constrains(set_constrains_index,1)) = parameters(i)*constrains(set_constrains_index,3);
+        end
+        end
+    elseif all_parameter(i) == -1
+        
+        all_parameter(i) = -2;
+        parameters = vertcat(parameters(1:i-1),0,parameters(i:end));
+        
+    else % fixed or set by constrained
+        set_constrains_index = find(constrains(:,2) == i);
+        parameters = vertcat(parameters(1:i-1),0,parameters(i:end));
+        if set_constrains_index ~= 0
+            
+        all_parameter(constrains(set_constrains_index,1)) = all_parameter(i)*constrains(set_constrains_index,3);
+        end
+        
+    end
+end
+
+if micro_rev(1) ~= 0
+for mc = 1:nr_of_mic_rev
+
+    all_parameter(micro_rev(mc,1)) = (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1)))));
+    
+end
+end
+
+if MR_correction == 1
+for mc = 1:nr_of_mic_rev
+if MR_correction == 1
+        while (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1))))) <= LB(1)
+            all_parameter((cell2mat(micro_revers_cell(mc,2)))) = all_parameter((cell2mat(micro_revers_cell(mc,2)))) * 1.1;
+            all_parameter((cell2mat(micro_revers_cell(mc,1)))) = all_parameter((cell2mat(micro_revers_cell(mc,1)))) * 0.9;
+            all_parameter(all_parameter > UB(1)) = UB(1);
+            all_parameter(all_parameter < LB(1)) = LB(1);
+        end
+        while (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1))))) >= UB(1)
+            all_parameter((cell2mat(micro_revers_cell(mc,2)))) = all_parameter((cell2mat(micro_revers_cell(mc,2)))) * 0.9;
+            all_parameter((cell2mat(micro_revers_cell(mc,1)))) = all_parameter((cell2mat(micro_revers_cell(mc,1)))) * 1.1;
+            all_parameter(all_parameter > UB(1)) = UB(1);
+            all_parameter(all_parameter < LB(1)) = LB(1);
+        end
+end
+end
+end
+
+
+
+
+nr_states = size(model,1);
+model_2 = model;
+for row = 2:nr_states
+    model_2(row,:) = model(row,:) + nr_states*(row-1);
+end
+model(model > 0) = 1;
+model_3 = model.*model_2;
+model_3 = model_3(:);
+model_3(model_3 == 0) = [];
+model_3 = sort(model_3);
+Q = zeros(nr_states.^2, 1);
+Q(model_3) = all_parameter';
+Q = reshape(Q,nr_states,nr_states)';
+for row = 1:nr_states
+    Q(row,row) = -1 * sum(Q(row,:));
+end
+
+corrected_initial_guess_remove = vertcat(constrains(:,1),constrains(:,4),micro_rev(:,1));
+corrected_initial_guess_remove(corrected_initial_guess_remove==0) = [];
+corrected_initial_guess = all_parameter;
+corrected_initial_guess(corrected_initial_guess_remove) = [];
+end
+
+
+end
+
+

@@ -1,0 +1,45 @@
+function [dwell] = SCAIM_HATidealization(data,SC_amp,sample_rate)
+
+step_size = 1000000/sample_rate;
+cross_thr = SC_amp/2;
+
+
+if data(1) > cross_thr
+    dwell_status = 1;
+else
+    dwell_status = 0;
+end
+counter = 0;
+dwell_counter = 0;
+left_over = 0;
+for row = 1:size(data,1)
+    counter = counter + step_size;
+    if data(row) > cross_thr && dwell_status == 0
+               
+        dwell_counter = dwell_counter + 1;
+        fragtion_up = (cross_thr - data(row-1))/(data(row) - data(row-1));
+        extra = step_size * fragtion_up;
+        dwell(dwell_counter,1) = dwell_status;
+        dwell(dwell_counter,2) = (counter - step_size) + extra + left_over;
+        left_over = step_size - extra;
+        counter = 0;
+        dwell_status = 1;
+    end
+    
+    if data(row) < cross_thr && dwell_status == 1
+                
+        dwell_counter = dwell_counter + 1;
+        fragtion_up = (cross_thr - data(row))/(data(row-1) - data(row));
+        extra = step_size * fragtion_up;
+        dwell(dwell_counter,1) = dwell_status;
+        dwell(dwell_counter,2) = counter - extra + left_over;
+        left_over = extra;
+        counter = 0;
+        dwell_status = 0;
+        
+    end
+end
+
+
+
+

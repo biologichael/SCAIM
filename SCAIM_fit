@@ -1,0 +1,1387 @@
+ function [history,current_best] = SCAIM_fit(dwell_times,model,constrains,microscopic_reversibility,dead_time, nr_of_open_states)
+ 
+ %rng default
+ 
+ alt_bisec = 0;
+current_algo = 'initiation';
+ 
+ % Simplex parameters
+ restart_threshold = 1;
+ first_multiplication_factor = 1.5;
+ second_multiplication_factor = 4;
+ nr_of_restarts = 3;
+ simplex_max_iterations = 4000;
+ 
+ 
+ % Particle swarm parameters
+ SwarmSize = 100;
+ 
+ if microscopic_reversibility ~= 0
+    MR_correction = 1;
+ else
+    MR_correction = 0;
+ end
+ 
+ 
+ nr_of_parameters = model;
+ nr_of_parameters(nr_of_parameters>0) = 1;
+ nr_of_parameters = sum(sum(nr_of_parameters));
+ nocp1 = microscopic_reversibility;
+ nocp1(nocp1>0) = 1;
+ nocp2 = constrains;
+ nocp2(nocp2>0) = 1;
+ nr_of_constrained_parameters = sum(nocp1(:,1)) + sum(nocp2(:,1)) + sum(nocp2(:,4));
+ nr_free_parameters = nr_of_parameters - nr_of_constrained_parameters;
+ 
+ %% expanding bounds
+ 
+ function [x,fval,history] = Expanding_Bounds(dwell,model,constrains,MR,DeadTime, nr_of_open_states,nr_par)
+
+initial_lower_bound = 10;
+initial_upper_bound = 2000;
+rounds = 3;
+factor_expander = 10;
+
+current_best = zeros(1,nr_par+1);
+current_best(1) = inf;
+
+for row = 1:rounds
+    current_algo = 'particle swarm';
+    if row == 1
+        low = initial_lower_bound;
+        up = initial_upper_bound;
+        
+        [x,fval,history] = Global_fit_ps(dwell,model,low,up,0,constrains,MR,DeadTime, nr_of_open_states,nr_par);
+        for row_correct = 1:size(history,1)
+            [~,~,corrected_initial_guess] = model2Q_v2(model,history(row_correct,2:end),constrains,MR,MR_correction,low(1),up(1));
+            history(row_correct,2:end) = corrected_initial_guess;
+        end
+        history_seperator = ones(1,size(history,2));
+        history_seperator_use = history_seperator * low;
+        history = vertcat(history,history_seperator_use);
+    end
+        
+    if row < rounds
+        current_algo = 'simplex';
+        NoR = nr_of_restarts;
+        nr_of_restarts = 0;
+        SmI = simplex_max_iterations;
+        simplex_max_iterations = SwarmSize;
+        low = low / factor_expander;
+        up = up * factor_expander;
+    [optimized_simplex, history_sim] = my_simplex_opt(current_best(1,2:end),dwell,model,constrains,MR, DeadTime, nr_of_open_states,low,up);
+     history_sim(1,:) = [];
+     
+    for row_correct = 1:size(history_sim,1)
+            [~,~,corrected_initial_guess] = model2Q_v2(model,history_sim(row_correct,2:end),constrains,MR,MR_correction,low(1),up(1));
+            history_sim(row_correct,2:end) = corrected_initial_guess;
+    end
+    history_sim = vertcat(history_sim,ones(1,nr_par+1)*rounds);
+    history = vertcat(history,history_sim);
+    x = optimized_simplex(1,2:end);
+    fval = optimized_simplex(1,1);
+    nr_of_restarts = NoR;
+    simplex_max_iterations = SmI;
+    end
+    
+    
+    
+    if row == rounds
+        low = low / factor_expander;
+        up = up * factor_expander;
+        current_algo = 'final simplex';
+    [optimized_simplex, history_sim] = my_simplex_opt(current_best(1,2:end),dwell,model,constrains,MR, DeadTime, nr_of_open_states,low,up);
+     history_sim(1,:) = [];
+    for row_correct = 1:size(history_sim,1)
+            [~,~,corrected_initial_guess] = model2Q_v2(model,history_sim(row_correct,2:end),constrains,MR,MR_correction,low(1),up(1));
+            history_sim(row_correct,2:end) = corrected_initial_guess;
+    end
+    history = vertcat(history,history_sim);
+    x = optimized_simplex(1,2:end);
+    fval = optimized_simplex(1,1);
+    end
+    
+ end
+ end
+
+%%
+function [x,fval,history_ps] = Global_fit_ps(dwell,model,low,up,initial,constrains,MR,DeadTime, nr_of_open_states,nr_par)
+
+history_ps = [];
+LB = ones(nr_par,1)*low;
+UB = ones(nr_par,1)*up;
+options = optimoptions(@particleswarm,'OutputFcn',@outfun_nested,'PlotFcn','pswplotbestf','FunctionTolerance',1e-3,'MaxStallIterations',5);
+options.SwarmSize = SwarmSize;
+if initial ~= 0
+    options.InitialSwarmMatrix = initial;
+end
+%options.InitialSwarmSpan = 10;
+model_fitness = @(initial_guess) Fit_model2dwell(initial_guess, dwell,model,constrains,MR, DeadTime, nr_of_open_states,LB,UB);
+[x,fval] = particleswarm(model_fitness,nr_par,LB,UB,options);
+
+
+    function stop = outfun_nested(x,optimValues,state)
+        stop = false;
+        current_itiration = horzcat(x.swarmfvals,x.swarm); % organize swarm parameters and assosiated fvals in single matrix
+        history_ps = [history_ps; current_itiration];
+    end
+
+end
+
+%%
+
+function [output] = Fit_model2dwell(initial_guess, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB)
+
+    if micro_rev ~= 0
+        MR_correction = 1;
+    else
+        MR_correction = 0;
+    end
+
+% to avoid several parameters with same value, those that hit upper border
+% are reduced by factor 1, 0.1 , 0.2 and so, those that hit lower border
+% increased by factor 1, 0.1, and so
+upper_count = 1;
+lower_count = 1;
+
+initial_guess(initial_guess > UB(1)) = UB(1);
+initial_guess(initial_guess < LB(1)) = LB(1);
+
+
+for row = 1:size(initial_guess,2)
+    if initial_guess(row) == UB(1)
+        if upper_count > 1
+            initial_guess(row) = initial_guess(row) - (initial_guess(row) * 0.01 * (upper_count-1));
+        end
+        upper_count = upper_count + 1;
+    end
+    if initial_guess(row) == LB(1)
+        if lower_count > 1
+            initial_guess(row) = initial_guess(row) + (initial_guess(row) * 0.01 * (lower_count-1));
+        end
+        lower_count = lower_count + 1;
+    end
+end
+
+
+% epsilon is the deadtime (tjek)
+bad_model = 0;
+parameter_out_of_bound = 0;
+%disp(initial_guess)
+
+[Q,~,corrected_initial_guess] = model2Q_v2(model,initial_guess,constrains,micro_rev,MR_correction,LB(1),UB(1));
+
+
+%constrains(3) = [];
+%[Q,~,corrected_initial_guess] = model2Q(model,initial_guess,constrains,micro_rev,MR_correction,LB(1),UB(1))
+
+disp(Q)
+
+
+if parameter_out_of_bound == 0
+
+% number of open (kA) and closed (kF) states
+kA = nr_of_open_states;
+kF = size(model,1) - kA;
+k = kA+kF;
+
+% Q matrix subdivisions
+QAA = Q(1:kA, 1:kA);
+QAF = Q(1:kA, kA+1:k);
+QFA = Q(kA+1:k, 1:kA);
+QFF = Q(kA+1:k, kA+1:k);
+
+% Eigen values and vectors of the Q matrix
+[EigVe_Q, EigVa_Q]  = eig(-1*Q);
+
+% To get the zero eigen value first we flip the values
+EigVe_Q = fliplr(EigVe_Q);
+EigVa_Q = rot90(EigVa_Q,2);
+
+% Spectral matrices (Single channel recordings page 615). We get i = 1 to k
+% spectral matrixes that we get by putting i into the spectral script:
+Y = inv(EigVe_Q);
+
+% collect all spectral matrixes into a single matrix Ai_matrix
+for row = 1:k
+    Ai = EigVe_Q(:,row)*Y(row,:);
+    if row == 1
+        Ai_matrix = Ai;
+    else
+        Ai_matrix = vertcat(Ai_matrix,Ai);
+    end
+end
+
+%% for 0=<u=<epsilon
+% from 2.23, 2.22 and 2.21 CHS96 we get
+AR_1 = @(u) N0AF(Ai_matrix,u,k,kA,EigVa_Q);
+FR_1 = @(u) N0FA(Ai_matrix,u,k,kA,EigVa_Q);
+
+%% for epsilon=<u=<2*epsilon
+% exponential of QFF matrix multiplied by epsilon (2.20 CHS96)
+% exponential of QAA matrix multiplied by epsilon (2.20 CHS96)
+
+% A_Ci1oM Ci1o matrix for A
+for i = 1:k
+    Cioo = Ai_matrix((1+k*(i-1):(kA+k*(i-1))),1:kA);
+    AiAF = Ai_matrix((1+k*(i-1):(kA+k*(i-1))),kA+1:k);
+    Di = AiAF * expm(QFF * DeadTime) * QFA;
+    first_round = 0;
+    for j = 1:k
+        if j ~= i
+            Cjoo = Ai_matrix((1+k*(j-1):(kA+k*(j-1))),1:kA);
+            AjAF = Ai_matrix((1+k*(j-1):(kA+k*(j-1))),kA+1:k);
+            Dj = AjAF * expm(QFF * DeadTime) * QFA;
+            if first_round == 0
+                Ci1o = (Di * Cjoo + Dj * Cioo) / (EigVa_Q(j,j)-EigVa_Q(i,i));
+            else 
+                Ci1o_ad = (Di * Cjoo + Dj * Cioo) / (EigVa_Q(j,j)-EigVa_Q(i,i));
+                Ci1o = Ci1o + Ci1o_ad;
+            end
+            first_round = 1;
+        end
+    end
+    if i == 1
+        A_Ci1oM = Ci1o;
+    else
+        A_Ci1oM = vertcat(A_Ci1oM,Ci1o);
+    end
+    if i == 1
+        A_Ci11M = Di * Cioo;
+    else
+        A_Ci11M = vertcat(A_Ci11M,Di * Cioo);
+    end
+end
+
+% F_Ci1oM Ci1o matrix for F
+for i = 1:k
+    Cioo = Ai_matrix((1+kA+k*(i-1):(k+k*(i-1))),1+kA:k);
+    AiFA = Ai_matrix((1+kA+k*(i-1):(k+k*(i-1))),1:kA);
+    Di = AiFA * expm(QAA * DeadTime) * QAF;
+    first_round = 0;
+    for j = 1:k
+        if j ~= i
+            Cjoo = Ai_matrix((1+kA+k*(j-1):(k+k*(j-1))),1+kA:k);
+            AjFA = Ai_matrix((1+kA+k*(j-1):(k+k*(j-1))),1:kA);
+            Dj = AjFA * expm(QAA * DeadTime) * QAF;
+            if first_round == 0
+                Ci1o = (Di * Cjoo + Dj * Cioo) / (EigVa_Q(j,j)-EigVa_Q(i,i));
+            else 
+                Ci1o_ad = (Di * Cjoo + Dj * Cioo) / (EigVa_Q(j,j)-EigVa_Q(i,i));
+                Ci1o = Ci1o + Ci1o_ad;
+            end
+            first_round = 1;
+        end
+    end
+    if i == 1
+        F_Ci1oM = Ci1o;
+    else
+        F_Ci1oM = vertcat(F_Ci1oM,Ci1o);
+    end
+    if i == 1
+        F_Ci11M = Di * Cioo;
+    else
+        F_Ci11M = vertcat(F_Ci11M,Di * Cioo);
+    end
+end
+
+AR_2 = @(u) N0AF(Ai_matrix,u,k,kA,EigVa_Q) - N1AF_new((u-DeadTime),k,kA,EigVa_Q,A_Ci1oM,A_Ci11M);
+FR_2 = @(u) N0FA(Ai_matrix,u,k,kA,EigVa_Q) - N1FA_new((u-DeadTime),k,kF,EigVa_Q,F_Ci1oM,F_Ci11M);
+
+%% for u>2*epsilon
+
+% HJC92  54
+A_H = @(s) QAA + QAF * (inv(s*eye(kF) - QFF)) * (eye(kF) - expm(-1*(s*eye(kF)-QFF)*DeadTime)) * QFA;
+A_W = @(s) s*eye(kA) - A_H(s);
+det_A_W = @(s) det(A_W(s));
+
+F_H = @(s) QFF + QFA * (inv(s*eye(kA) - QAA)) * (eye(kA) - expm(-1*(s*eye(kA)-QAA)*DeadTime)) * QAF;
+F_W = @(s) s*eye(kF) - F_H(s);
+det_F_W = @(s) det(F_W(s));
+
+%% find F_roots
+[lower, upper, break_all] = find_borders(QFF,QFA,kA,kF,QAA,DeadTime,QAF);
+
+if break_all == 0
+    [F_roots, breaker] = Bisectioning_simple(QFF,QFA,kA,kF,QAA,DeadTime,QAF,lower, upper);
+    if breaker == 1
+        alt_bisec = alt_bisec + 1;
+    [F_roots, break_all] = Find_roots(QFF,QFA,kA,kF,QAA,DeadTime,QAF,lower, upper);
+    end
+end
+%% find A_roots
+[lower, upper, break_all] = find_borders(QAA,QAF,kF,kA,QFF,DeadTime,QFA);
+if break_all == 0
+    [A_roots, breaker] = Bisectioning_simple(QAA,QAF,kF,kA,QFF,DeadTime,QFA,lower, upper);
+    if breaker == 1
+        alt_bisec = alt_bisec + 1;
+    [A_roots, break_all] = Find_roots(QAA,QAF,kF,kA,QFF,DeadTime,QFA,lower, upper);
+    end
+end
+
+if break_all == 0
+
+tol = 1e-6;
+% Increase A_root precision
+for row2 = 1:kA
+decimal_stepper = 10;
+variable_tolerance = (1/(tol/100));
+A_roots_float = (round(A_roots(row2) * variable_tolerance));
+row = 0;
+while abs(A_roots_float) < 1e20
+    row = row +1;
+    variable_tolerance = variable_tolerance * decimal_stepper;
+    A_roots_float = A_roots_float * decimal_stepper;
+while abs(det_A_W((A_roots_float-1)/variable_tolerance)) < abs(det_A_W(A_roots_float/variable_tolerance))
+    A_roots_float = A_roots_float - 1;
+end
+while abs(det_A_W((A_roots_float+1)/variable_tolerance)) < abs(det_A_W(A_roots_float/variable_tolerance))
+    A_roots_float = A_roots_float + 1;
+end
+end
+if abs(det_A_W(A_roots_float/variable_tolerance)) < abs(det_A_W(A_roots(row2)))
+
+    A_roots_float_all(row2) = A_roots_float/variable_tolerance;
+else
+    A_roots_float_all(row2) = A_roots(row2);
+end
+
+end
+
+% Increase F_root precision
+for row2 = 1:kF
+decimal_stepper = 10;
+variable_tolerance = (1/(tol*100));
+F_roots_float = (round(F_roots(row2) * variable_tolerance));
+row = 0;
+
+while abs(F_roots_float) < 1e20
+    row = row +1;
+    variable_tolerance = variable_tolerance * decimal_stepper;
+    F_roots_float = F_roots_float * decimal_stepper;
+while abs(det_F_W((F_roots_float-1)/variable_tolerance)) < abs(det_F_W(F_roots_float/variable_tolerance))
+    F_roots_float = F_roots_float - 1;
+end
+while abs(det_F_W((F_roots_float+1)/variable_tolerance)) < abs(det_F_W(F_roots_float/variable_tolerance))
+    F_roots_float = F_roots_float + 1;
+end
+
+end
+if abs(det_F_W(F_roots_float/variable_tolerance)) < abs(det_F_W(F_roots(row2)))
+
+    F_roots_float_all(row2) = F_roots_float/variable_tolerance;
+else
+    F_roots_float_all(row2) = F_roots(row2);
+end
+end
+
+for row = 1:kA
+    if det_A_W(A_roots_float_all(row)) < det_A_W(A_roots(row))
+        A_roots(row) = A_roots_float_all(row);
+    end
+end
+for row = 1:kF
+    if det_F_W(F_roots_float_all(row)) < det_F_W(F_roots(row))
+        F_roots(row) = F_roots_float_all(row);
+    end
+end
+
+%%
+% HJC 90 eq. 2.16 and 2.17
+LFF_star = @(s) expm(-(s*eye(kF)-QFF)*DeadTime);
+LAA_star = @(s) expm(-(s*eye(kA)-QAA)*DeadTime);
+
+% Jeg har prøvet forskellige muligheder for at finde right og left
+% eigenvectors og SFF/SAA, og prøver her den tilgang der er i F_asym3
+% istedet for version 1 eller 2.
+
+rF_mat = zeros(kF);
+cF_mat = zeros(kF);
+for row = 1:kF
+    [V,D,W] = eig(F_H(F_roots(row)));
+    [val,~] = min(abs(D-F_roots(row)));
+    [~,inx] = min(val);
+    rF_mat(row,:) = W(:,inx)/sum(W(:,inx));
+    cF_mat(:,row) = V(:,inx)/sum(V(:,inx));
+end
+rA_mat = zeros(kA);
+cA_mat = zeros(kA);
+for row = 1:kA
+    [V,D,W] = eig(A_H(A_roots(row)));
+    [val,~] = min(abs(D-A_roots(row)));
+    [~,inx] = min(val);
+    rA_mat(row,:) = W(:,inx)/sum(W(:,inx));
+    cA_mat(:,row) = V(:,inx)/sum(V(:,inx));
+end
+
+% HJC92 eq 4 HJC 90 eq. 2.10
+GAF_star = @(s) (inv(s*eye(kA)-QAA))*QAF;
+GFA_star = @(s) (inv(s*eye(kF)-QFF))*QFA;
+% HJC92 eq 17
+SAA_star = @(s) eye(kA)-expm(-1*(s*eye(kA)-QAA)*DeadTime);
+SFF_star = @(s) eye(kF)-expm(-1*(s*eye(kF)-QFF)*DeadTime);
+% 96 eq 2.30
+F_dW = @(s) eye(kF) + QFA*(SAA_star(s)*(inv(s*eye(kA)-QAA))-DeadTime*(eye(kA)-SAA_star(s))) * GAF_star(s); 
+A_dW = @(s) eye(kA) + QAF*(SFF_star(s)*(inv(s*eye(kF)-QFF))-DeadTime*(eye(kF)-SFF_star(s))) * GFA_star(s); 
+
+% en matrix der indeholder F_Ri for alle F_roots
+
+F_Ri = @(j) (cF_mat(:,j) * rF_mat(j,:)) / (rF_mat(j,:) * F_dW(F_roots(j)) * cF_mat(:,j));
+
+for row = 1:kF
+    if row == 1
+        FRi_matrix = F_Ri(row);
+    else
+        FRi_matrix = vertcat(FRi_matrix,F_Ri(row));
+    end
+end
+F_Ti = zeros(kF,1);
+for row = 1:kF
+    F_Ti(row) = -1 / F_roots(row);
+end
+    
+% en matrix der indeholder A_Ri for alle A_roots
+
+A_Ri = @(j) (cA_mat(:,j) * rA_mat(j,:)) / (rA_mat(j,:) * A_dW(A_roots(j)) * cA_mat(:,j));
+
+
+for row = 1:kA
+    if row == 1
+        ARi_matrix = A_Ri(row);
+    else
+        ARi_matrix = vertcat(ARi_matrix,A_Ri(row));
+    end
+end
+A_Ti = zeros(kA,1);
+for row = 1:kA
+    A_Ti(row) = -1 / A_roots(row);
+end
+
+AR_3 = @(u) A_asym4(kA,u,A_Ti,ARi_matrix);
+FR_3 = @(u) F_asym4(kF,u,F_Ti,FRi_matrix);
+
+
+%% Equilibrium vectors 
+% HJC 90 eq. 2.20
+
+eGAF_star = @(s) (inv(eye(kA)-GAF_star(s)*SFF_star(s)*GFA_star(s)))*GAF_star(s)*LFF_star(s);
+eGFA_star = @(s) (inv(eye(kF)-GFA_star(s)*SAA_star(s)*GAF_star(s)))*GFA_star(s)*LAA_star(s);
+
+eGAFGFA_star = eGAF_star(0) * eGFA_star(0);
+Eq_A = ones(1,kA) * (inv((horzcat((eye(kA) - eGAFGFA_star),ones(kA,1))) * (horzcat((eye(kA) - eGAFGFA_star),ones(kA,1)))'));
+Eq_F = Eq_A * eGAF_star(0);
+
+
+%% Fitting
+
+AF = QAF * expm(QFF * DeadTime);
+FA = QFA * expm(QAA * DeadTime);
+eGAF_1 = @(t) double(AR_1(t-DeadTime) * AF); % t >= epsilon && t <= 2*epsilon
+eGAF_2 = @(t) double(AR_2(t-DeadTime) * AF); % t > 2*epsilon && t <= 3*epsilon
+eGAF_3 = @(t) double(AR_3(t-DeadTime) * AF); % t > 3*epsilon
+
+eGFA_1 = @(t) double(FR_1(t-DeadTime) * FA); % t >= epsilon && t <= 2*epsilon
+eGFA_2 = @(t) double(FR_2(t-DeadTime) * FA); % t > 2*epsilon && t <= 3*epsilon
+eGFA_3 = @(t) double(FR_3(t-DeadTime) * FA); % t > 3*epsilon
+
+
+fitting_on = 1;
+
+% Remove start and/or end dwells if they are shut states
+if fitting_on == 1
+    
+if dwell(1,1) == 0
+    dwell(1,:) = [];
+end
+if dwell(end,1) == 0
+    dwell(end,:) = [];
+end
+
+dwell = dwell(:,2);
+counter = 0;
+
+if dwell(1) <= 2*DeadTime
+   l = (Eq_A * eGAF_1(dwell(1)));
+elseif (dwell(1) > 2*DeadTime) && (dwell(1) <= 3*DeadTime)
+   l = (Eq_A * eGAF_2(dwell(1)));
+else
+   l = (Eq_A * eGAF_3(dwell(1)));
+end
+
+for i = 2:2:((size(dwell,1))-1)
+         % closed dwell
+        if dwell(i) <= 2*DeadTime
+            l = (l * eGFA_1(dwell(i)));
+        elseif (dwell(i) > 2*DeadTime) && (dwell(i) <= 3*DeadTime)
+            l = (l * eGFA_2(dwell(i)));
+        else
+            l = (l * eGFA_3(dwell(i)));
+        end
+        
+       
+        % open dwell
+        if dwell(i+1) <= 2*DeadTime
+            l = (l * eGAF_1(dwell(i+1)));
+        elseif (dwell(i+1) > 2*DeadTime) && (dwell(i+1) <= 3*DeadTime)
+            l = (l * eGAF_2(dwell(i+1)));
+        else
+            l = (l * eGAF_3(dwell(i+1)));
+        end
+        
+        
+
+        if (l * ones(kF,1)) <= 0
+            bad_model = 1;
+            remaining_dwells = ((size(dwell,1))-1) - i;     % penalty to count number for breaking before all dwells accounted for
+            break
+        end
+
+        while (l * ones(kF,1)) > 1e15
+            l = l/1e14;
+            
+            counter = counter+log(1e14);
+
+        end
+        while (l * ones(kF,1)) < 1/1e15
+            
+            l = l*1e14;
+            counter = counter-log(1e14);
+            
+        end
+        
+        if l * ones(kF,1) == inf || l * ones(kF,1) == -inf
+            bad_model = 1;
+            remaining_dwells = ((size(dwell,1))-1) - i;
+            l = l * 0;
+            break
+        end
+        
+end
+
+l = (l * ones(kF,1));
+
+
+
+if bad_model == 1
+    disp('bad model')
+    
+    counter = remaining_dwells*remaining_dwells;
+    output = real(counter);
+else
+counter = counter + log(l);
+disp(-real(counter));
+if -real(counter) <= current_best(1)
+current_best(1) = -real(counter);
+current_best(1,2:end) = corrected_initial_guess;
+end
+disp(-real(counter))
+disp(current_algo)
+disp(current_best)
+output = -real(counter);
+
+end
+end
+
+else
+    disp('root finding failed')
+    output = 666666666666
+end
+
+else
+    disp('parameter out of bound')
+    output = 555555555555
+end
+
+
+end
+
+
+%%
+function [optimized_simplex, history_sim] = my_simplex_opt(initial_guess,dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB)
+
+history_sim = zeros(size(initial_guess,2)+1,1)';
+shrink_vec = zeros(1,size(initial_guess,2));
+
+simplex_matrix = zeros(size(initial_guess,2)+1);
+current_guess = initial_guess;
+simplex_matrix(1,1) = Fit_model2dwell(initial_guess, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+simplex_matrix(1,2:end) = initial_guess;
+for row = 1:size(initial_guess,2)
+    current_guess = current_guess * first_multiplication_factor;
+    current_guess(row) = initial_guess(row) * second_multiplication_factor;
+    simplex_matrix(row+1,1) = Fit_model2dwell(current_guess, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+    simplex_matrix(row+1,2:end) = current_guess;
+    current_guess = initial_guess;
+end
+
+
+%% the function
+function optimized_simplex = simplex_optimizer(matrix,max_iti,restart_tol)
+simplex_matrix = matrix;
+on = 1;
+itiration = 0;
+
+while on == 1
+    
+[~,order] = sort(simplex_matrix(:,1));
+simplex_matrix = simplex_matrix(order,:);
+
+history_sim = vertcat(history_sim,simplex_matrix(1,:));
+    
+if restart_tol > 0
+    if mean(simplex_matrix(:,1)) < (min(simplex_matrix(:,1))+restart_tol) && mean(simplex_matrix(:,1)) > (min(simplex_matrix(:,1))-restart_tol)
+        on = 0;
+        disp('no improvements')
+    end
+end
+if ((sum(round(simplex_matrix(:,1)))) / size(simplex_matrix,1)) == round(min(simplex_matrix(:,1)))
+        on = 0;
+        disp('no improvements')
+end
+
+itiration = itiration + 1
+
+if itiration > max_iti
+    on = 0;
+    disp('max itirations')
+end
+
+
+% reflection
+reflect = simplex_matrix(end,:);
+%simplex_matrix(end,:) = [];
+modifier = mean(simplex_matrix(1:end-1,2:end));
+modified_reflection = 2*modifier-reflect(1,2:end);
+modified_reflection(modified_reflection < LB) = LB;
+modified_reflection_value = Fit_model2dwell(modified_reflection, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+if modified_reflection_value >= simplex_matrix(1,1) && modified_reflection_value < simplex_matrix(end-1,1) % point 4
+    modified_reflection = horzcat(modified_reflection_value,modified_reflection);
+    simplex_matrix = vertcat(simplex_matrix(1:end-1,:),modified_reflection);
+    continue
+end
+if modified_reflection_value < simplex_matrix(1,1) % point 5
+    % expansion point
+    expansion_point = modifier + 2 * (modifier - reflect(1,2:end));
+    expansion_point(expansion_point < LB) = LB;
+    expansion_point_value = Fit_model2dwell(expansion_point, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+    if expansion_point_value < modified_reflection_value
+        expansion_point = horzcat(expansion_point_value,expansion_point);
+        simplex_matrix = vertcat(simplex_matrix(1:end-1,:),expansion_point);
+        continue
+    else
+        modified_reflection = horzcat(modified_reflection_value,modified_reflection);
+        simplex_matrix = vertcat(simplex_matrix(1:end-1,:),modified_reflection);
+        continue
+    end
+end
+if modified_reflection_value >= simplex_matrix(end-1,1) % point 6
+    if modified_reflection_value < reflect(1,1) % point 6a
+        contract = modifier + (modified_reflection - modifier)/2;
+        contract(contract < LB) = LB;
+        contract_value = Fit_model2dwell(contract, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+        if contract_value < reflect(1,1)
+            contract = horzcat(contract_value,contract);
+            simplex_matrix = vertcat(simplex_matrix(1:end-1,:),contract);
+            continue
+        else
+            simplex_matrix_shrink = simplex_matrix;
+            for shrink = 1:size(initial_guess,2)
+                simplex_matrix_shrink(shrink+1,2:end) = simplex_matrix_shrink(1,2:end) + (simplex_matrix(shrink+1,2:end) - simplex_matrix_shrink(1,2:end))/2;
+                shrink_vec = simplex_matrix_shrink(shrink+1,2:end);
+                shrink_vec(shrink_vec < LB) = LB;
+                simplex_matrix_shrink(shrink+1,1) = Fit_model2dwell(shrink_vec, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+                simplex_matrix_shrink(shrink+1,2:end) = shrink_vec;
+            end
+            simplex_matrix = simplex_matrix_shrink;
+        end
+    end
+    if modified_reflection_value >= reflect(1,1) % point 6b
+        contract_2 = modifier + (reflect(1,2:end) - modifier)/2;
+        contract_2(contract_2 < LB) = LB;
+        contract_2_value = Fit_model2dwell(contract_2, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+        if contract_2_value < reflect(1,1)
+            contract_2 = horzcat(contract_2_value,contract_2);
+            simplex_matrix = vertcat(simplex_matrix(1:end-1,:),contract_2);
+            continue
+        else
+            simplex_matrix_shrink = simplex_matrix;
+            for shrink = 1:size(initial_guess,2)
+                simplex_matrix_shrink(shrink+1,2:end) = simplex_matrix_shrink(1,2:end) + (simplex_matrix(shrink+1,2:end) - simplex_matrix_shrink(1,2:end))/2;
+                shrink_vec = simplex_matrix_shrink(shrink+1,2:end);
+                shrink_vec(shrink_vec < LB) = LB;
+                simplex_matrix_shrink(shrink+1,1) = Fit_model2dwell(shrink_vec, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+                simplex_matrix_shrink(shrink+1,2:end) = shrink_vec;
+            end
+            simplex_matrix = simplex_matrix_shrink;
+        end
+
+    end
+    
+    
+end
+
+end
+optimized_simplex = simplex_matrix;
+end
+
+%%
+
+for restart = 1:nr_of_restarts
+old_value = simplex_matrix(1,1);
+optimized_simplex = simplex_optimizer(simplex_matrix,round(simplex_max_iterations/4),restart_threshold);
+initial_guess_2 = optimized_simplex(1,2:end);
+simplex_matrix = zeros(size(initial_guess_2,2)+1);
+current_guess = initial_guess_2;
+simplex_matrix(1,1) = Fit_model2dwell(initial_guess_2, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+simplex_matrix(1,2:end) = initial_guess_2;
+for row = 1:size(initial_guess_2,2)
+    if rand < 0.5
+        current_guess = current_guess * first_multiplication_factor;
+    else
+        current_guess = current_guess / first_multiplication_factor;
+    end
+    if rand < 0.5
+        current_guess(row) = initial_guess_2(row) * second_multiplication_factor;
+    else
+        current_guess(row) = initial_guess_2(row) / second_multiplication_factor;
+    end
+    
+    simplex_matrix(row+1,1) = Fit_model2dwell(current_guess, dwell,model,constrains,micro_rev, DeadTime, nr_of_open_states,LB,UB);
+    simplex_matrix(row+1,2:end) = current_guess;
+    current_guess = initial_guess_2;
+end
+if old_value == optimized_simplex(1,1)
+    continue
+end
+
+end
+% final run
+optimized_simplex = simplex_optimizer(simplex_matrix,simplex_max_iterations,0);
+
+end
+
+%% Find borders
+     function [lower, upper, break_all] = find_borders(QAA,QAF,kF,kA,QFF,epsilon,QFA)
+         tic
+         skipping_time = 120;
+         break_all = 0;
+expansion_factor = 2;
+% HJC92  54
+A_H = @(s) QAA + QAF * (inv(s*eye(kF) - QFF)) * (eye(kF) - expm(-1*(s*eye(kF)-QFF)*epsilon)) * QFA;
+A_W = @(s) s*eye(kA) - A_H(s);
+det_A_W = @(s) det(A_W(s));
+
+% HJC92 eq 4 HJC 90 eq. 2.10
+GFA_star = @(s) (inv(s*eye(kF)-QFF))*QFA;
+% HJC92 eq 17
+SFF_star = @(s) eye(kF)-expm(-1*(s*eye(kF)-QFF)*epsilon);
+% 96 eq 2.30
+A_dW = @(s) eye(kA) + QAF*(SFF_star(s)*(inv(s*eye(kF)-QFF))-epsilon*(eye(kF)-SFF_star(s))) * GFA_star(s); 
+
+dif_det_A_W = @(s) det_A_W(s) * trace((inv(A_W(s))) * A_dW(s));
+
+% find initial brackets
+A_lower_limit = real(eig(A_H(1)));
+A_lower_limit = min(A_lower_limit);
+A_upper_limit = real(eig(A_H(1)));
+A_upper_limit = max(A_upper_limit);
+
+% the difference between lower and upper limit give impression of the scale
+% we opperate at
+A_scale = abs(A_lower_limit - A_upper_limit)/2;
+A_lower_limit = A_lower_limit - A_scale;
+A_upper_limit = A_upper_limit + A_scale;
+
+count = 1;
+factor = 1;
+if isnan(det_A_W(A_lower_limit)) == 1
+while isnan(det_A_W(A_lower_limit)) == 1
+    A_lower_limit = A_lower_limit + factor;
+    count = count+1;
+    if count == 10
+        factor = factor * 10;
+        count = 1;
+    end
+end
+count = 1;
+factor = 1;
+while isnan(det_A_W(A_lower_limit)) == 0
+    A_lower_limit = A_lower_limit - factor;
+    count = count+1;
+    if count == 10
+        factor = factor * 10;
+        count = 1;
+    end
+end
+A_lower_limit = A_lower_limit + factor;
+end
+
+% With an even number of roots, bracket ends must have same sign and move
+% in different direction. With odd number of roots, sign must be
+% different, but direction the same.
+% While these conditions are not true, we continue to increase the span of
+% the initial brackets.
+initial_brackets_accepted = 0;
+
+while initial_brackets_accepted == 0  && break_all == 0
+    
+            c2 = toc;
+            if  c2 > skipping_time
+                break_all = 1;
+                
+                break
+            end
+        
+    lower_bound_direction = dif_det_A_W(A_lower_limit) > 0;
+    upper_bound_direction = dif_det_A_W(A_upper_limit) > 0;
+    initial_end_direction = lower_bound_direction + upper_bound_direction; % if 2 or 0 direction is the same
+    lower_bound_sign = det_A_W(A_lower_limit) > 0;
+    upper_bound_sign = det_A_W(A_upper_limit) > 0;
+    initial_end_sign = lower_bound_sign + upper_bound_sign ;% if 2 or 0, sign is the same
+
+    if mod(kA,2) == 0
+        if initial_end_direction == 1 && initial_end_sign ~= 1 
+            initial_brackets_accepted = 1;
+        else
+            A_lower_limit = A_lower_limit - A_scale * expansion_factor;
+            A_upper_limit = A_upper_limit + A_scale * expansion_factor;
+                        
+        end
+    end
+    if mod(kA,2) == 1
+        if initial_end_direction ~= 1 && initial_end_sign == 1 
+            initial_brackets_accepted = 1;
+        else
+            A_lower_limit = A_lower_limit - A_scale * expansion_factor;
+            A_upper_limit = A_upper_limit + A_scale * expansion_factor;
+        end
+    end
+end
+
+lower = A_lower_limit;
+upper = A_upper_limit;
+
+     end
+
+%%
+function [found_roots, break_all] = Find_roots(QAA,QAF,kF,kA,QFF,epsilon,QFA,lower, upper)
+tic
+found_roots = zeros(1,kA);
+break_all = 0;
+skipping_time = 120; % in seconds
+
+% når matrixen når størrelse split_point fjernes alle de største værdier
+% der ikke rammer et sign_shift inde. vi reducerer til reduced_matrix size
+split_point = 1000;
+reduced_matrix = 100;
+
+% HJC92  54
+A_H = @(s) QAA + QAF * (inv(s*eye(kF) - QFF)) * (eye(kF) - expm(-1*(s*eye(kF)-QFF)*epsilon)) * QFA;
+A_W = @(s) s*eye(kA) - A_H(s);
+det_A_W = @(s) det(A_W(s));
+
+% HJC92 eq 4 HJC 90 eq. 2.10
+GFA_star = @(s) (inv(s*eye(kF)-QFF))*QFA;
+% HJC92 eq 17
+SFF_star = @(s) eye(kF)-expm(-1*(s*eye(kF)-QFF)*epsilon);
+% 96 eq 2.30
+A_dW = @(s) eye(kA) + QAF*(SFF_star(s)*(inv(s*eye(kF)-QFF))-epsilon*(eye(kF)-SFF_star(s))) * GFA_star(s); 
+
+dif_det_A_W = @(s) det_A_W(s) * trace((inv(A_W(s))) * A_dW(s));
+
+%% Fine adjustment function
+% find local_min, local_max or root
+    function [point] = fine_adjust(start_point, limit)
+        point = 0;
+        tolerance_tf = eps(start_point)*100; % minimum step size within float-digits that are precise
+        start_sign = det_A_W(start_point) > 0;
+        counter = 0;
+        round_sim = 1;
+        stop_condition = 0;
+        while stop_condition == 0 && break_all == 0
+            c2 = toc;
+            if  c2 > skipping_time
+                break_all = 1;
+                
+                break
+            end
+            start_point = start_point + tolerance_tf;
+            new_sign = det_A_W(start_point) > 0;
+            if start_sign ~= new_sign
+                if round_sim == 1
+                    posible_roots(1) = start_point - tolerance_tf;
+                    posible_roots(2) = start_point;
+                    posible_root_values = abs(arrayfun(det_A_W, posible_roots));
+                    [~,right_root] = min(posible_root_values);
+                    point = posible_roots(right_root);
+                    break
+                else
+                    start_point = start_point - tolerance_tf;
+                    tolerance_tf = eps(start_point)*100;
+                    round_sim = 1;
+                    counter = 0;
+                end
+            end
+            if start_point > limit
+                if round_sim ~= 1
+                %    fplot(det_A_W,[lower upper])
+                %    break
+                %else
+                    start_point = start_point - tolerance_tf;
+                    tolerance_tf = eps(start_point)*100;
+                    round_sim = 1;
+                    counter = 0;
+                end
+            end
+            counter = counter + 1;
+            if counter == 10
+                tolerance_tf = tolerance_tf * 10;
+                counter = 0;
+                round_sim = round_sim + 1;                
+            end
+        end
+    end
+
+%if kA == 2
+%    fplot(det_A_W,[A_lower_limit A_upper_limit])
+%end
+
+%% Finding roots
+section_matrix = zeros(4,2);
+section_matrix(1,:) = [lower upper];
+section_matrix(2,:) = arrayfun(det_A_W,section_matrix(1,:));
+section_matrix(3,:) = section_matrix(2,:) > 0;
+
+%for row = 1:size(section_matrix,2)
+%    section_matrix(4,row) = dir_fun(section_matrix(1,row));
+%end
+
+on = 1;
+while on == 1 && break_all == 0
+            c2 = toc;
+            if  c2 > skipping_time
+                break_all = 1;
+                break
+            end
+section_extend = (section_matrix(1,1:end-1)+section_matrix(1,2:end))/2;
+section_extend(2,:) = arrayfun(det_A_W,section_extend(1,:));
+section_extend(3,:) = section_extend(2,:) > 0;
+section_extend(4,:) = section_extend(1,:) * 0;
+%for row = 1:size(section_extend,2)
+%    section_extend(4,row) = dir_fun(section_extend(1,row));
+%end
+new_section = zeros(4,2*size(section_matrix,2)-1);
+new_section(:,1:2:end) = section_matrix;
+new_section(:,2:2:end) = section_extend;
+section_matrix = new_section;
+
+events = section_matrix(3,1:end-1) + section_matrix(3,2:end);
+events(events ~= 1) = 0;
+
+if sum(events) == kA
+    break
+end
+
+if size(section_matrix,2) > split_point
+    for row = 3:2:size(section_matrix,2)-2
+        section_matrix(4,row) = dif_det_A_W(section_matrix(1,row)) > 0;
+        section_matrix(4,row+1) = dif_det_A_W(section_matrix(1,row+1)) > 0;
+        if section_matrix(4,row) == 1 && sum(section_matrix(4,(row-1):(row+1))) == 1
+            section_matrix(4,row) = 0;
+        end
+    end
+    
+    events2 = section_matrix(3:4,1:end-1) + section_matrix(3:4,2:end);
+    events2(events2 ~= 1) = 0;
+    
+    target_sections_sign = [find(events2(1,:));find(events2(1,:))+1];
+    target_sections_sign = target_sections_sign(:);
+    target_sections_dir = [find(events2(2,:));find(events2(2,:))+1;find(events2(2,:))-1];
+    target_sections_dir = target_sections_dir(:);
+    target_combined = vertcat(target_sections_sign,target_sections_dir);
+    
+    safe_sections = section_matrix(:,target_combined);
+    section_matrix(:,target_combined) = [];
+    [~, order] = sort(abs(section_matrix(2,:)));
+    ordered_section_matrix = section_matrix(:,order);
+    section_matrix = horzcat( ordered_section_matrix(:,1:reduced_matrix),safe_sections);
+    [~, order] = sort(section_matrix(1,:));
+    section_matrix = section_matrix(:,order);
+
+end
+
+end
+
+if break_all == 0
+target_sections = [find(events(1,:));find(events(1,:))+1];
+
+for k = 1:kA
+    if break_all == 0
+    point = fine_adjust(section_matrix(1,target_sections(1,k)), section_matrix(1,target_sections(2,k)));
+    found_roots(k) = point;
+    end
+end
+
+end
+end
+
+%% simple bisectioning
+
+function [found_roots, breaker] = Bisectioning_simple(QAA,QAF,kF,kA,QFF,DeadTime,QFA,lower, upper)
+
+tic
+
+found_roots = zeros(1,kA);
+
+% HJC92  54
+A_H = @(s) QAA + QAF * (inv(s*eye(kF) - QFF)) * (eye(kF) - expm(-1*(s*eye(kF)-QFF)*DeadTime)) * QFA;
+A_W = @(s) s*eye(kA) - A_H(s);
+det_A_W = @(s) det(A_W(s));
+
+target_brackets = 1;
+breaker = 0;
+
+current_brackets = [lower upper];
+while target_brackets < kA
+    new_points = (current_brackets(:,1)/2+current_brackets(:,2)/2);
+    new_bracket_matrix = zeros(size(new_points,1)+size(current_brackets,1),2);
+    new_bracket_matrix(1:2:end,1) = current_brackets(1:end,1);
+    new_bracket_matrix(2:2:end,2) = current_brackets(1:end,2);
+    new_bracket_matrix(2:2:end,1) = new_points(1:end,1);
+    new_bracket_matrix(1:2:end,2) = new_points(1:end,1);
+    result_matrix = arrayfun(det_A_W,new_bracket_matrix);
+    result_matrix(result_matrix > 0) = 1;
+    result_matrix(result_matrix < 0) = 0;
+    sum_result_matrix = sum(result_matrix,2);
+    sum_result_matrix(sum_result_matrix ~= 1) = 0;
+    target_brackets = sum(sum_result_matrix);
+    current_brackets = new_bracket_matrix;
+    break_time = toc;
+    if break_time > 1
+        breaker = 1;
+        found_roots = zeros(1,kA);
+        break
+    end
+    
+    
+end
+if breaker == 0
+[idx, ~] = find(sum_result_matrix == 1);
+for root_nr = 1:kA
+    found_roots(root_nr) = fzero(det_A_W,new_bracket_matrix(idx(root_nr,1),:));
+end
+end
+    
+end
+
+function [Q, all_parameter,corrected_initial_guess] = model2Q_v2(model,parameters,constrains,micro_rev,MR_correction,LB,UB)
+
+parameters=parameters';
+model(model==0)=9999;
+model = sort(model,2);
+model(model==9999)=0;
+
+nr_parameters = sum(sum(model > 0));
+all_parameter = zeros(nr_parameters,1);
+
+parameter_nr_in_model = model';
+parameter_nr_in_model(parameter_nr_in_model > 0) = 1;
+counter = 1;
+for parameter_nr = 1:(size(model,1) * size(model,2))
+    if parameter_nr_in_model(parameter_nr) == 1
+        parameter_nr_in_model(parameter_nr) = counter;
+        counter = counter + 1;
+    end
+end
+parameter_nr_in_model = parameter_nr_in_model';
+
+% set fixed parameters
+if constrains(1) ~= 0
+fixed = constrains(:,4:5);
+fixed(fixed == 0) = nr_parameters + 1;
+all_parameter(fixed(:,1)) = fixed(:,2);
+all_parameter = all_parameter(1:nr_parameters,1);
+end
+
+% find kinetic reversibility constrained
+% Vi starter med den state med lavest nummer, og finder den state der
+% konnektes til med lavest nummer. Så går vi til den nye og finder hvilken
+% den konnekter til som ikke er den vi kom fra osv.
+
+nr_of_mic_rev = size(micro_rev,1);
+if micro_rev(1) ~= 0
+for mic_rev_nr = 1:nr_of_mic_rev
+states_in_circle = micro_rev(mic_rev_nr,2:end);
+states_in_circle(states_in_circle==0) = [];
+connect_candidate = 0;
+past_connect = 0;
+balanced_dirrection = zeros(size(states_in_circle,2),2);
+
+for state = 1:size(states_in_circle,2)
+    if state == 1
+        current_state = min(states_in_circle);
+    end
+    
+    for connection = 1:size(states_in_circle,2)
+        
+        if state == size(states_in_circle,2)
+
+            balanced_dirrection(state,1) = parameter_nr_in_model(current_state, find(model(current_state,:) == min(states_in_circle)));
+            balanced_dirrection(state,2) = parameter_nr_in_model(min(states_in_circle), find(model(min(states_in_circle),:) == current_state));
+            
+        else
+        connect = find(model(current_state,:) == states_in_circle(connection));
+        if isempty(connect) ~= 1
+            if model(current_state,connect) > connect_candidate && model(current_state,connect) ~= past_connect
+                connect_candidate = model(current_state,connect);
+                balanced_dirrection(state,1) = parameter_nr_in_model(current_state,connect);
+                balanced_dirrection(state,2) = parameter_nr_in_model(connect_candidate, find(model(connect_candidate,:) == current_state));
+                
+            end
+        end
+        end
+    end
+    past_connect = current_state;
+    current_state = connect_candidate;
+    connect_candidate = 0;
+end
+
+if find(balanced_dirrection == micro_rev(mic_rev_nr,1)) > size(states_in_circle,2)
+    balanced_dirrection = flip(balanced_dirrection,2);
+end
+dir_1 = balanced_dirrection(:,1);
+dir_2 = balanced_dirrection(:,2);
+% replace linket parameters by their multiplication factor
+MR_factor = 1;
+for row_con = 1:size(constrains,1)
+    if isempty(find(dir_1==constrains(row_con,2))) ~= 1 % contrain nr row_con er i MR, er den parameter der sætters efter den også?
+        if isempty(find(dir_2==constrains(row_con,1))) ~= 1
+            dir_1(dir_1 == constrains(row_con,2)) = [];
+            dir_2(dir_2 == constrains(row_con,1)) = [];
+            MR_factor = constrains(row_con,3);
+        end
+    end
+    if isempty(find(dir_2==constrains(row_con,2))) ~= 1 % contrain nr row_con er i MR, er den parameter der sætters efter den også?
+        if isempty(find(dir_1==constrains(row_con,1))) ~= 1
+            dir_2(dir_2 == constrains(row_con,2)) = [];
+            dir_1(dir_1 == constrains(row_con,1)) = [];
+            MR_factor = 1/constrains(row_con,3);
+        end
+    end
+end
+
+dir_1(dir_1 == micro_rev(mic_rev_nr,1)) = [];
+micro_revers_cell(mic_rev_nr,1) = {dir_1};
+micro_revers_cell(mic_rev_nr,2) = {dir_2};
+
+end
+end
+
+% De states der angives som at cykliske må hver have mindst to connections,
+% og for cyclen skal hver state 
+if micro_rev(1) ~= 0
+all_parameter(micro_rev(:,1)) = -1;
+end
+
+% insert remaining parameters while taking constrains into consideration
+for i = 1:nr_parameters
+    if all_parameter(i) == 0 % not fixed
+        if constrains(1) ~= 0
+        set_constrains_index = find(constrains(:,2) == i);
+        end
+        all_parameter(i) = parameters(i);
+        if constrains(1) ~= 0
+        if set_constrains_index ~= 0
+            
+        all_parameter(constrains(set_constrains_index,1)) = parameters(i)*constrains(set_constrains_index,3);
+        end
+        end
+    elseif all_parameter(i) == -1
+        
+        all_parameter(i) = -2;
+        parameters = vertcat(parameters(1:i-1),0,parameters(i:end));
+        
+    else % fixed or set by constrained
+        set_constrains_index = find(constrains(:,2) == i);
+        parameters = vertcat(parameters(1:i-1),0,parameters(i:end));
+        if set_constrains_index ~= 0
+            
+        all_parameter(constrains(set_constrains_index,1)) = all_parameter(i)*constrains(set_constrains_index,3);
+        end
+        
+    end
+end
+
+if micro_rev(1) ~= 0
+for mc = 1:nr_of_mic_rev
+
+    all_parameter(micro_rev(mc,1)) = (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1)))));
+    
+end
+end
+
+if MR_correction == 1
+for mc = 1:nr_of_mic_rev
+if MR_correction == 1
+        while (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1))))) <= LB(1)
+            all_parameter((cell2mat(micro_revers_cell(mc,2)))) = all_parameter((cell2mat(micro_revers_cell(mc,2)))) * 1.1;
+            all_parameter((cell2mat(micro_revers_cell(mc,1)))) = all_parameter((cell2mat(micro_revers_cell(mc,1)))) * 0.9;
+            all_parameter(all_parameter > UB(1)) = UB(1);
+            all_parameter(all_parameter < LB(1)) = LB(1);
+        end
+        while (prod(all_parameter(cell2mat(micro_revers_cell(mc,2))))*MR_factor) / (prod(all_parameter(cell2mat(micro_revers_cell(mc,1))))) >= UB(1)
+            all_parameter((cell2mat(micro_revers_cell(mc,2)))) = all_parameter((cell2mat(micro_revers_cell(mc,2)))) * 0.9;
+            all_parameter((cell2mat(micro_revers_cell(mc,1)))) = all_parameter((cell2mat(micro_revers_cell(mc,1)))) * 1.1;
+            all_parameter(all_parameter > UB(1)) = UB(1);
+            all_parameter(all_parameter < LB(1)) = LB(1);
+        end
+end
+end
+end
+
+nr_states = size(model,1);
+model_2 = model;
+for row = 2:nr_states
+    model_2(row,:) = model(row,:) + nr_states*(row-1);
+end
+model(model > 0) = 1;
+model_3 = model.*model_2;
+model_3 = model_3(:);
+model_3(model_3 == 0) = [];
+model_3 = sort(model_3);
+Q = zeros(nr_states.^2, 1);
+Q(model_3) = all_parameter';
+Q = reshape(Q,nr_states,nr_states)';
+for row = 1:nr_states
+    Q(row,row) = -1 * sum(Q(row,:));
+end
+
+corrected_initial_guess_remove = vertcat(constrains(:,1),constrains(:,4),micro_rev(:,1));
+corrected_initial_guess_remove(corrected_initial_guess_remove==0) = [];
+corrected_initial_guess = all_parameter;
+corrected_initial_guess(corrected_initial_guess_remove) = [];
+
+end
+
+function output = A_asym4(kA,u,A_Ti,ARi_matrix)
+
+
+for row = 1:kA
+    
+    Ti = A_Ti(row);
+    
+    ARi = ARi_matrix((1+((row-1)*kA)):(kA*row),1:kA);
+   
+    
+    if row == 1
+        
+        adder = ARi * exp(-1 * u / Ti);
+        if adder == 0
+            adder = 1e-15;
+        end
+        
+    else
+        
+        adder2 = ARi * exp(-1 * u / Ti);
+        if adder2 == 0
+            adder2 = 1e-15;
+        end
+        
+        adder = adder + adder2;
+    end
+    
+end
+
+output = adder;
+end
+
+function output = F_asym4(kF,u,F_Ti,FRi_matrix)
+
+
+for row = 1:kF
+    Ti = F_Ti(row);
+    FRi = FRi_matrix((1+((row-1)*kF)):(kF*row),1:kF);
+    if row == 1
+        adder = FRi * exp(-1 * u / Ti);
+        if adder == 0
+            adder = 1e-15;
+        end
+            
+        
+    else
+        adder2 = FRi * exp(-1 * u / Ti);
+        if adder2 == 0
+            adder = 1e-15;
+        end
+        adder = adder + adder2;
+    end
+    
+end
+
+output = adder;
+end
+
+function output = N0FA(Ai_matrix,u,k,kA,EigVa_Q)
+
+for i = 1:k
+    Cioo = Ai_matrix((1+kA+k*(i-1):(k+k*(i-1))),1+kA:k);
+    to_add = Cioo * exp((-1*EigVa_Q(i,i))*u);
+    if i == 1
+        final = to_add;
+    else
+        final = final+to_add;
+    end
+end
+
+output = final;
+end
+
+function output = N0AF(Ai_matrix,u,k,kA,EigVa_Q)
+
+for i = 1:k
+    Cioo = Ai_matrix((1+k*(i-1):(kA+k*(i-1))),1:kA);
+    to_add = Cioo * exp((-1*EigVa_Q(i,i))*u);
+    if i == 1
+        final = to_add;
+    else
+        final = final+to_add;
+    end
+end
+
+output = final;
+end
+
+function output = N1FA_new(u,k,kF,EigVa_Q,F_Ci1oM,F_Ci11M)
+
+for i = 1:k
+    if i == 1
+        N1FA = (F_Ci1oM((1+kF*(i-1):(kF+kF*(i-1))),1:kF) + F_Ci11M((1+kF*(i-1):(kF+kF*(i-1))),1:kF) * u) * exp((-1*EigVa_Q(i,i))*u);
+   
+    else
+        N1FA = N1FA + (F_Ci1oM((1+kF*(i-1):(kF+kF*(i-1))),1:kF) + F_Ci11M((1+kF*(i-1):(kF+kF*(i-1))),1:kF) * u) * exp((-1*EigVa_Q(i,i))*u);
+    end
+end
+    
+output = N1FA;
+end
+
+function output = N1AF_new(u,k,kA,EigVa_Q,A_Ci1oM,A_Ci11M)
+
+for i = 1:k
+    if i == 1
+        N1AF = (A_Ci1oM((1+kA*(i-1):(kA+kA*(i-1))),1:kA) + A_Ci11M((1+kA*(i-1):(kA+kA*(i-1))),1:kA) * u) * exp((-1*EigVa_Q(i,i))*u);
+    else
+        N1AF = N1AF + (A_Ci1oM((1+kA*(i-1):(kA+kA*(i-1))),1:kA) + A_Ci11M((1+kA*(i-1):(kA+kA*(i-1))),1:kA) * u) * exp((-1*EigVa_Q(i,i))*u);
+    end
+end
+
+output = N1AF;
+end
+
+%%
+
+ [x,fval,history] = Expanding_Bounds(dwell_times,model,constrains,microscopic_reversibility,dead_time, nr_of_open_states,nr_free_parameters);
+
+
+ end
+ 

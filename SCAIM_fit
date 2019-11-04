@@ -1073,7 +1073,7 @@ end
 end
     
 end
-
+%% make model
 function [Q, all_parameter,corrected_initial_guess] = model2Q_v2(model,parameters,constrains,micro_rev,MR_correction,LB,UB)
 
 parameters=parameters';
@@ -1096,7 +1096,7 @@ end
 parameter_nr_in_model = parameter_nr_in_model';
 
 % set fixed parameters
-if constrains(1) ~= 0
+if constrains(1) ~= 0 || constrains(4) ~= 0
 fixed = constrains(:,4:5);
 fixed(fixed == 0) = nr_parameters + 1;
 all_parameter(fixed(:,1)) = fixed(:,2);
@@ -1177,6 +1177,7 @@ micro_revers_cell(mic_rev_nr,2) = {dir_2};
 end
 end
 
+
 % De states der angives som at cykliske må hver have mindst to connections,
 % og for cyclen skal hver state 
 if micro_rev(1) ~= 0
@@ -1185,6 +1186,7 @@ end
 
 % insert remaining parameters while taking constrains into consideration
 for i = 1:nr_parameters
+    
     if all_parameter(i) == 0 % not fixed
         if constrains(1) ~= 0
         set_constrains_index = find(constrains(:,2) == i);
@@ -1211,6 +1213,7 @@ for i = 1:nr_parameters
         
     end
 end
+
 
 if micro_rev(1) ~= 0
 for mc = 1:nr_of_mic_rev

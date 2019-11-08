@@ -39,17 +39,18 @@ current_algo = 'initiation';
 
 initial_lower_bound = 10;
 initial_upper_bound = 2000;
-rounds = 3;
+rounds = 2;
 factor_expander = 10;
-
+low = initial_lower_bound;
+up = initial_upper_bound;
 current_best = zeros(1,nr_par+1);
 current_best(1) = inf;
 
 for row = 1:rounds
     current_algo = 'particle swarm';
     if row == 1
-        low = initial_lower_bound;
-        up = initial_upper_bound;
+        % current_best(1,2:end)
+
         
         [x,fval,history] = Global_fit_ps(dwell,model,low,up,0,constrains,MR,DeadTime, nr_of_open_states,nr_par);
         for row_correct = 1:size(history,1)
@@ -147,7 +148,6 @@ lower_count = 1;
 initial_guess(initial_guess > UB(1)) = UB(1);
 initial_guess(initial_guess < LB(1)) = LB(1);
 
-
 for row = 1:size(initial_guess,2)
     if initial_guess(row) == UB(1)
         if upper_count > 1
@@ -168,6 +168,7 @@ end
 bad_model = 0;
 parameter_out_of_bound = 0;
 %disp(initial_guess)
+
 
 [Q,~,corrected_initial_guess] = model2Q_v2(model,initial_guess,constrains,micro_rev,MR_correction,LB(1),UB(1));
 
@@ -300,6 +301,10 @@ F_W = @(s) s*eye(kF) - F_H(s);
 det_F_W = @(s) det(F_W(s));
 
 %% find F_roots
+if kF == 1 
+    [F_roots, break_all] = Find_one_root(QFF,QFA,kA,kF,QAA,DeadTime,QAF);
+    
+else
 [lower, upper, break_all] = find_borders(QFF,QFA,kA,kF,QAA,DeadTime,QAF);
 
 if break_all == 0
@@ -309,8 +314,17 @@ if break_all == 0
     [F_roots, break_all] = Find_roots(QFF,QFA,kA,kF,QAA,DeadTime,QAF,lower, upper);
     end
 end
+end
+
+
 %% find A_roots
+if kA == 1 && break_all == 0
+    [A_roots, break_all] = Find_one_root(QAA,QAF,kF,kA,QFF,DeadTime,QFA);
+    
+else
+
 [lower, upper, break_all] = find_borders(QAA,QAF,kF,kA,QFF,DeadTime,QFA);
+
 if break_all == 0
     [A_roots, breaker] = Bisectioning_simple(QAA,QAF,kF,kA,QFF,DeadTime,QFA,lower, upper);
     if breaker == 1
@@ -318,6 +332,9 @@ if break_all == 0
     [A_roots, break_all] = Find_roots(QAA,QAF,kF,kA,QFF,DeadTime,QFA,lower, upper);
     end
 end
+
+end
+
 
 if break_all == 0
 
@@ -786,6 +803,7 @@ A_lower_limit = min(A_lower_limit);
 A_upper_limit = real(eig(A_H(1)));
 A_upper_limit = max(A_upper_limit);
 
+
 % the difference between lower and upper limit give impression of the scale
 % we opperate at
 A_scale = abs(A_lower_limit - A_upper_limit)/2;
@@ -861,6 +879,67 @@ end
 lower = A_lower_limit;
 upper = A_upper_limit;
 
+     end
+     
+%%
+ 
+     function [found_root, break_all] = Find_one_root(QAA,QAF,kF,kA,QFF,epsilon,QFA)
+         
+         break_all = 0;
+% HJC92  54
+A_H = @(s) QAA + QAF * (inv(s*eye(kF) - QFF)) * (eye(kF) - expm(-1*(s*eye(kF)-QFF)*epsilon)) * QFA;
+A_W = @(s) s*eye(kA) - A_H(s);
+det_A_W = @(s) det(A_W(s));
+
+found_root = 0;
+upper = 0;
+lower = -1;
+exp_count = 0;
+while isreal(det_A_W(lower)) == 0 || isfinite(det_A_W(lower)) == 0
+    lower = lower + abs(lower *0.05);
+    
+    
+end
+    if det_A_W(upper) > 0 && isreal(det_A_W(upper)) == 1 && isfinite(det_A_W(upper)) == 1
+        while det_A_W(lower) > 0
+            lower = lower * 10;
+            exp_count = exp_count + 1;
+            while isreal(det_A_W(lower)) == 0 || isfinite(det_A_W(lower)) == 0
+                lower = lower + abs(lower/10);
+              
+            end
+        end         
+    elseif det_A_W(upper) < 0 && isreal(det_A_W(upper)) == 1 && isfinite(det_A_W(upper)) == 1
+        while det_A_W(lower) < 0
+            lower = lower * 10;
+            exp_count = exp_count + 1;
+            while isreal(det_A_W(lower)) == 0 || isfinite(det_A_W(lower)) == 0
+                lower = lower + abs(lower/10);
+              
+            end
+        end
+    else
+        while isreal(det_A_W(upper)) == 0 || isfinite(det_A_W(upper)) == 0
+            upper = upper - 1;
+            if upper == -10000
+                break_all = 1;
+                break
+            end
+        end
+
+        return
+    end
+    
+    if break_all == 0
+        if exp_count ~= 0
+            upper = lower/10;
+        end
+
+        found_root = fzero(det_A_W,[lower, upper]);
+    end
+
+         
+         
      end
 
 %%

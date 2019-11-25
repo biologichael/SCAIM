@@ -1175,7 +1175,7 @@ end
 parameter_nr_in_model = parameter_nr_in_model';
 
 % set fixed parameters
-if constrains(1) ~= 0 || constrains(4) ~= 0
+if constrains(1,1) ~= 0 || constrains(1,4) ~= 0
 fixed = constrains(:,4:5);
 fixed(fixed == 0) = nr_parameters + 1;
 all_parameter(fixed(:,1)) = fixed(:,2);
